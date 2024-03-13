@@ -48,11 +48,11 @@ Columns are easy to add, drop or rename:
 
 The `content` tab displays all the table data. Links in the table header can be used to sort the data:
 
-![](https://media.charlesleifer.com/blog/photos/im-1694620353079.png)
+![](https://media.charlesleifer.com/blog/photos/im-1707415896996.png)
 
 The `query` tab allows you to execute arbitrary SQL queries on a table. The query results are displayed in a table and can be exported to either JSON or CSV:
 
-![](https://media.charlesleifer.com/blog/photos/im-1694620393808.png)
+![](https://media.charlesleifer.com/blog/photos/im-1707415396996.png)
 
 The `import` tab supports importing CSV and JSON files into a table. There is an option to automatically create columns for any unrecognized keys in the import file:
 
@@ -94,6 +94,7 @@ The following options are available:
 * `-R`, `--rows-per-page`: set pagination on content page, default 50 rows.
 * `-e`, `--extension`: path or name of loadable extension(s). To load
   multiple extensions, specify ``-e [path]`` for each extension.
+* `-f`, `--foreign-keys`: enable foreign-key constraint pragma.
 * `-u`, `--url-prefix`: URL prefix for application, e.g. "/sqlite-web".
 * `-c`, `--cert` and ``-k``, ``--key`` - specify SSL cert and private key.
 * `-a`, `--ad-hoc` - run using an ad-hoc SSL context.
