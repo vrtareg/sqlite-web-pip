@@ -1,5 +1,7 @@
 #!/usr/bin/env python
 
+__version__ = '0.6.3'
+
 import base64
 import datetime
 import hashlib
@@ -65,8 +67,8 @@ else:
         return highlight(data, lexer, formatter)
 
 try:
-    from peewee import __version__
-    peewee_version = tuple([int(p) for p in __version__.split('.')])
+    from peewee import __version__ as _pw_version
+    peewee_version = tuple([int(p) for p in _pw_version.split('.')])
 except ImportError:
     raise RuntimeError('Unable to import peewee module. Install by running '
                        'pip install peewee')
@@ -74,7 +76,7 @@ else:
     if peewee_version < (3, 0, 0):
         raise RuntimeError('Peewee >= 3.0.0 is required. Found version %s. '
                            'Please update by running pip install --update '
-                           'peewee' % __version__)
+                           'peewee' % _pw_version)
 
 from peewee import *
 from peewee import IndexMetadata
@@ -85,8 +87,9 @@ from playhouse.migrate import migrate
 
 CUR_DIR = os.path.realpath(os.path.dirname(__file__))
 DEBUG = False
-MAX_RESULT_SIZE = 1000
 ROWS_PER_PAGE = 50
+QUERY_ROWS_PER_PAGE = 1000
+TRUNCATE_VALUES = True
 SECRET_KEY = 'sqlite-database-browser-0.1.0'
 
 app = Flask(
@@ -302,10 +305,40 @@ def _query_view(template, table=None):
         default_sql = ''
         model_class = dataset._base_model
 
+    page = page_next = page_prev = page_start = page_end = total_pages = 1
+    total = -1  # Number of rows in query result.
     if qsql:
         if export_format:
             query = model_class.raw(qsql).dicts()
             return export(query, export_format, table)
+
+        try:
+            total, = dataset.query('SELECT COUNT(*) FROM (%s) as _' %
+                                   qsql.rstrip('; ')).fetchone()
+        except Exception as exc:
+            total = -1
+
+        # Apply pagination.
+        rpp = app.config['QUERY_ROWS_PER_PAGE']
+        page = request.values.get('page')
+        if page and page.isdigit():
+            page = max(int(page), 1)
+        else:
+            page = 1
+        offset = (page - 1) * rpp
+        page_prev, page_next = max(page - 1, 1), page + 1
+
+        # Figure out highest page.
+        if total > 0:
+            total_pages = max(1, int(math.ceil(total / float(rpp))))
+            page = max(min(page, total_pages), 1)
+            page_next = min(page + 1, total_pages)
+            page_start = offset + 1
+            page_end = min(total, page_start + rpp - 1)
+
+        if page > 1:
+            qsql = ('SELECT * FROM (%s) AS _ LIMIT %d OFFSET %d' %
+                    (qsql.rstrip(' ;'), rpp, offset))
 
         try:
             cursor = dataset.query(qsql)
@@ -313,7 +346,7 @@ def _query_view(template, table=None):
             error = str(exc)
             app.logger.exception('Error in user-submitted query.')
         else:
-            data = cursor.fetchall()[:app.config['MAX_RESULT_SIZE']]
+            data = cursor.fetchmany(rpp)
             data_description = cursor.description
             row_count = cursor.rowcount
 
@@ -324,11 +357,18 @@ def _query_view(template, table=None):
         default_sql=default_sql,
         error=error,
         ordering=ordering,
+        page=page,
+        page_end=page_end,
+        page_next=page_next,
+        page_prev=page_prev,
+        page_start=page_start,
         query_images=get_query_images(),
         row_count=row_count,
         sql=sql,
         table=table,
-        table_sql=dataset.get_table_sql(table))
+        table_sql=dataset.get_table_sql(table),
+        total=total,
+        total_pages=total_pages)
 
 @app.route('/query/', methods=['GET', 'POST'])
 def generic_query():
@@ -599,8 +639,7 @@ def table_content(table):
     rows_per_page = app.config['ROWS_PER_PAGE']
     total_pages = max(1, int(math.ceil(total_rows / float(rows_per_page))))
     # Restrict bounds.
-    page_number = min(page_number, total_pages)
-    page_number = max(page_number, 1)
+    page_number = max(min(page_number, total_pages), 1)
 
     previous_page = page_number - 1 if page_number > 1 else None
     next_page = page_number + 1 if page_number < total_pages else None
@@ -676,11 +715,14 @@ def table_insert(table):
 
     columns = []
     col_dict = {}
+    defaults = {}
     row = {}
     for column in dataset.get_columns(table):
         field = model._meta.columns[column.name]
         if isinstance(field, AutoField):
             continue
+        if column.default:
+            defaults[column.name] = column.default
         columns.append(column)
         col_dict[column.name] = column
         row[column.name] = ''
@@ -721,11 +763,12 @@ def table_insert(table):
         else:
             flash('No data was specified to be inserted.', 'warning')
     else:
-        edited = set(col_dict)  # Make all fields editable on load.
+        edited = set(col_dict) - set(defaults)  # Make all fields editable on load.
 
     return render_template(
         'table_insert.html',
         columns=columns,
+        defaults=defaults,
         edited=edited,
         errors=errors,
         model=model,
@@ -874,7 +917,7 @@ def export(query, export_format, table=None):
     if export_format == 'json':
         kwargs = {'indent': 2}
         filename = 'export.json'
-        mimetype = 'text/javascript'
+        mimetype = 'application/json'
     else:
         kwargs = {}
         filename = 'export.csv'
@@ -1052,7 +1095,7 @@ def value_filter(value, max_length=250):
         value = base64.b64encode(value)[:1024].decode('utf8')
     if isinstance(value, unicode_type):
         value = escape(value)
-        if len(value) > max_length:
+        if len(value) > max_length and app.config['TRUNCATE_VALUES']:
             return ('<span class="truncated">%s</span> '
                     '<span class="full" style="display:none;">%s</span>'
                     '<a class="toggle-value" href="#">...</a>') % (
@@ -1103,6 +1146,7 @@ def _general():
     return {
         'dataset': dataset,
         'login_required': bool(app.config.get('PASSWORD')),
+        'version': __version__,
     }
 
 @app.context_processor
@@ -1185,8 +1229,24 @@ def get_option_parser():
         '--rows-per-page',
         default=50,
         dest='rows_per_page',
-        help='Number of rows to display per page (default=50)',
+        help='Number of rows to display per page in content tab (default=50)',
         type='int')
+    parser.add_option(
+        '-Q',
+        '--query-rows-per-page',
+        default=1000,
+        dest='query_rows_per_page',
+        help='Number of rows to display per page in query tab (default=1000)',
+        type='int')
+    parser.add_option(
+        '-T',
+        '--no-truncate',
+        action='store_false',
+        default=True,
+        dest='truncate_values',
+        help=('Disable truncating long text values. By default text values '
+              'are ellipsized after 50 characters and the full text is shown '
+              'on click.'))
     parser.add_option(
         '-u',
         '--url-prefix',
@@ -1327,6 +1387,10 @@ def main():
 
     if options.rows_per_page:
         app.config['ROWS_PER_PAGE'] = options.rows_per_page
+    if options.query_rows_per_page:
+        app.config['QUERY_ROWS_PER_PAGE'] = options.query_rows_per_page
+
+    app.config['TRUNCATE_VALUES'] = options.truncate_values
 
     # Initialize the dataset instance and (optionally) authentication handler.
     initialize_app(args[0], options.read_only, password, options.url_prefix,
